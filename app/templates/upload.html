@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Upload Event Poster{% endblock %}
+
+{% block content %}
+<section class="upload-section">
+    <div class="upload-container">
+        <h1 class="upload-title">Upload Event Poster</h1>
+        <p class="upload-subtitle">Upload event posters or images. Files are securely stored in Amazon S3.</p>
+
+        <div class="upload-box" id="uploadBox">
+            <div class="upload-icon">☁</div>
+            <p class="upload-text">Drag & drop your image here</p>
+            <p class="upload-hint">or click to browse — PNG, JPG, GIF, WebP (max 10 MB)</p>
+            <input type="file" id="fileInput" name="poster" accept=".png,.jpg,.jpeg,.gif,.webp" hidden>
+        </div>
+
+        <!-- Hidden form for actual submission -->
+        <form id="uploadForm" action="{{ url_for('upload_poster') }}" method="post" enctype="multipart/form-data" style="display:none;">
+            <input type="file" id="formFileInput" name="poster" accept=".png,.jpg,.jpeg,.gif,.webp">
+        </form>
+
+        <div id="preview" class="upload-preview" style="display:none;">
+            <img id="previewImg" src="" alt="Preview">
+            <div class="preview-info">
+                <span id="previewName"></span>
+                <button class="btn btn-secondary" id="btnClear">Remove</button>
+            </div>
+        </div>
+
+        <button class="btn btn-primary btn-full" id="btnUpload" disabled>Upload to S3</button>
+
+        {% if uploaded_url %}
+        <div class="upload-result">
+            <h3>Upload Successful ✓</h3>
+            <div class="result-image">
+                <img src="{{ uploaded_url }}" alt="Uploaded poster">
+            </div>
+            <div class="result-url">
+                <label>S3 URL:</label>
+                <input type="text" value="{{ uploaded_url }}" readonly id="s3Url">
+                <button class="btn btn-secondary" onclick="navigator.clipboard.writeText(document.getElementById('s3Url').value)">Copy</button>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const box = document.getElementById('uploadBox');
+    const fileInput = document.getElementById('fileInput');
+    const formFileInput = document.getElementById('formFileInput');
+    const form = document.getElementById('uploadForm');
+    const preview = document.getElementById('preview');
+    const previewImg = document.getElementById('previewImg');
+    const previewName = document.getElementById('previewName');
+    const btnUpload = document.getElementById('btnUpload');
+    const btnClear = document.getElementById('btnClear');
+
+    let selectedFile = null;
+
+    box.addEventListener('click', () => fileInput.click());
+
+    box.addEventListener('dragover', e => { e.preventDefault(); box.classList.add('drag-over'); });
+    box.addEventListener('dragleave', () => box.classList.remove('drag-over'));
+    box.addEventListener('drop', e => {
+        e.preventDefault();
+        box.classList.remove('drag-over');
+        if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+
+    function handleFile(file) {
+        selectedFile = file;
+        const reader = new FileReader();
+        reader.onload = e => {
+            previewImg.src = e.target.result;
+            previewName.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+            preview.style.display = 'flex';
+            box.style.display = 'none';
+            btnUpload.disabled = false;
+        };
+        reader.readAsDataURL(file);
+    }
+
+    btnClear.addEventListener('click', () => {
+        selectedFile = null;
+        preview.style.display = 'none';
+        box.style.display = 'flex';
+        btnUpload.disabled = true;
+    });
+
+    btnUpload.addEventListener('click', () => {
+        if (!selectedFile) return;
+        const dt = new DataTransfer();
+        dt.items.add(selectedFile);
+        formFileInput.files = dt.files;
+        form.submit();
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  UniEvent — Scalable University Event Management System
+  Deploys VPC, public/private subnets, NAT, ALB, EC2 instances, S3, and IAM.
+
+# ============================================================================
+# Parameters
+# ============================================================================
+Parameters:
+  TicketmasterApiKey:
+    Type: String
+    NoEcho: true
+    Description: Ticketmaster Discovery API key
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access (bastion only)
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small]
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (latest)
+
+# ============================================================================
+# Resources
+# ============================================================================
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: UniEvent-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: UniEvent-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── Public Subnets (ALB + NAT) ──────────────────────────────────────
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: UniEvent-Public-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: UniEvent-Public-2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: UniEvent-Public-RT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── NAT Gateway (for private subnet internet access) ────────────────
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: UniEvent-NAT
+
+  # ── Private Subnets (EC2 instances) ─────────────────────────────────
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: UniEvent-Private-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: UniEvent-Private-2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: UniEvent-Private-RT
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ── Security Groups ─────────────────────────────────────────────────
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP/HTTPS to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: UniEvent-ALB-SG
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: UniEvent-EC2-SG
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access to bastion host
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0    # Restrict to your IP in production
+      Tags:
+        - Key: Name
+          Value: UniEvent-Bastion-SG
+
+  # Allow EC2 to accept SSH from bastion
+  EC2SSHFromBastion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+
+  # ── IAM Role for EC2 (S3 access + SSM) ──────────────────────────────
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: UniEvent-EC2-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: UniEvent-S3-Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ── S3 Bucket (event media) ─────────────────────────────────────────
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "unievent-media-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ["*"]
+            AllowedMethods: [GET]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: UniEvent-Media
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadImages
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${S3Bucket}/event-images/*"
+          - Sid: PublicReadPosters
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${S3Bucket}/event-posters/*"
+
+  # ── Application Load Balancer ───────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: UniEvent-ALB
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: UniEvent-ALB
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: UniEvent-TG
+      Protocol: HTTP
+      Port: 5000
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref EC2Instance1
+          Port: 5000
+        - Id: !Ref EC2Instance2
+          Port: 5000
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── EC2 Instances (private subnets) ─────────────────────────────────
+  EC2Instance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: UniEvent-App-1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          yum update -y
+          yum install -y python3 python3-pip git
+          APP_DIR="/opt/unievent"
+          git clone https://github.com/DaraBodla/Assignment1_AWS_CE.git "$APP_DIR"
+          cd "$APP_DIR/app"
+          pip3 install -r requirements.txt
+          cat > /opt/unievent/.env <<EOF
+          FLASK_SECRET_KEY=$(openssl rand -hex 32)
+          TICKETMASTER_API_KEY=${TicketmasterApiKey}
+          S3_BUCKET_NAME=${S3Bucket}
+          AWS_REGION=${AWS::Region}
+          FETCH_INTERVAL=1800
+          EOF
+          cat > /etc/systemd/system/unievent.service <<'SVCEOF'
+          [Unit]
+          Description=UniEvent Flask Application
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/unievent/app
+          EnvironmentFile=/opt/unievent/.env
+          ExecStart=/usr/local/bin/gunicorn -c gunicorn.conf.py app:app
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+          systemctl daemon-reload
+          systemctl enable unievent
+          systemctl start unievent
+
+  EC2Instance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: UniEvent-App-2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          yum update -y
+          yum install -y python3 python3-pip git
+          APP_DIR="/opt/unievent"
+          git clone https://github.com/DaraBodla/Assignment1_AWS_CE.git "$APP_DIR"
+          cd "$APP_DIR/app"
+          pip3 install -r requirements.txt
+          cat > /opt/unievent/.env <<EOF
+          FLASK_SECRET_KEY=$(openssl rand -hex 32)
+          TICKETMASTER_API_KEY=${TicketmasterApiKey}
+          S3_BUCKET_NAME=${S3Bucket}
+          AWS_REGION=${AWS::Region}
+          FETCH_INTERVAL=1800
+          EOF
+          cat > /etc/systemd/system/unievent.service <<'SVCEOF'
+          [Unit]
+          Description=UniEvent Flask Application
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/unievent/app
+          EnvironmentFile=/opt/unievent/.env
+          ExecStart=/usr/local/bin/gunicorn -c gunicorn.conf.py app:app
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+          systemctl daemon-reload
+          systemctl enable unievent
+          systemctl start unievent
+
+  # ── Bastion Host (public subnet — for SSH debugging) ────────────────
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref BastionSecurityGroup
+      Tags:
+        - Key: Name
+          Value: UniEvent-Bastion
+
+# ============================================================================
+# Outputs
+# ============================================================================
+Outputs:
+  ALBEndpoint:
+    Description: Public URL of the Application Load Balancer
+    Value: !Sub "http://${ALB.DNSName}"
+
+  S3BucketName:
+    Description: S3 Bucket for event media
+    Value: !Ref S3Bucket
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC

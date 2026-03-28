@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}University Events{% endblock %}
+
+{% block content %}
+<!-- Hero Section -->
+<section class="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-content">
+        <h1 class="hero-title">University Events</h1>
+        <p class="hero-subtitle">Discover, register, and never miss what's happening on campus</p>
+        <div class="hero-meta">
+            <span class="meta-badge">☁ AWS Hosted</span>
+            <span class="meta-badge">⟳ Auto-synced</span>
+            <span class="meta-badge">Last updated: {{ last_fetch }}</span>
+        </div>
+    </div>
+</section>
+
+<!-- Filter Bar -->
+<section class="filter-bar">
+    <div class="filter-inner">
+        <input type="text" id="searchInput" class="filter-search" placeholder="Search events…">
+        <div class="filter-tags" id="filterTags">
+            <button class="filter-tag active" data-category="all">All</button>
+            <!-- Tags populated by JS -->
+        </div>
+        <button class="btn-refresh" id="btnRefresh" title="Refresh events from API">⟳ Refresh</button>
+    </div>
+</section>
+
+<!-- Events Grid -->
+<section class="events-section">
+    {% if events %}
+    <div class="events-grid" id="eventsGrid">
+        {% for event in events %}
+        <article class="event-card" data-category="{{ event.category }}">
+            <div class="card-image">
+                {% if event.image_url %}
+                <img src="{{ event.image_url }}" alt="{{ event.title }}" loading="lazy">
+                {% else %}
+                <div class="card-image-placeholder">◈</div>
+                {% endif %}
+                <span class="card-category">{{ event.category }}</span>
+            </div>
+            <div class="card-body">
+                <h3 class="card-title">{{ event.title }}</h3>
+                <div class="card-meta">
+                    <span class="card-date">📅 {{ event.date }}{% if event.time %} · {{ event.time }}{% endif %}</span>
+                    <span class="card-venue">📍 {{ event.venue }}{% if event.city %}, {{ event.city }}{% endif %}</span>
+                </div>
+                <p class="card-desc">{{ event.description[:150] }}{% if event.description|length > 150 %}…{% endif %}</p>
+                <div class="card-actions">
+                    <a href="{{ url_for('event_detail', event_id=event.id) }}" class="btn btn-primary">View Details</a>
+                </div>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">📭</div>
+        <h2>No Events Available</h2>
+        <p>Events will appear here once fetched from the API. Click Refresh or check your API key.</p>
+        <button class="btn btn-primary" id="btnEmptyRefresh">Fetch Events Now</button>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // Populate filter tags from categories
+    const cards = document.querySelectorAll('.event-card');
+    const categories = new Set();
+    cards.forEach(c => categories.add(c.dataset.category));
+    const tagContainer = document.getElementById('filterTags');
+    categories.forEach(cat => {
+        const btn = document.createElement('button');
+        btn.className = 'filter-tag';
+        btn.dataset.category = cat;
+        btn.textContent = cat;
+        tagContainer.appendChild(btn);
+    });
+
+    // Filter by category
+    tagContainer.addEventListener('click', e => {
+        if (!e.target.classList.contains('filter-tag')) return;
+        document.querySelectorAll('.filter-tag').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        const cat = e.target.dataset.category;
+        cards.forEach(c => {
+            c.style.display = (cat === 'all' || c.dataset.category === cat) ? '' : 'none';
+        });
+    });
+
+    // Search
+    document.getElementById('searchInput').addEventListener('input', e => {
+        const q = e.target.value.toLowerCase();
+        cards.forEach(c => {
+            const text = c.textContent.toLowerCase();
+            c.style.display = text.includes(q) ? '' : 'none';
+        });
+    });
+
+    // Refresh buttons
+    const doRefresh = () => {
+        fetch('/api/refresh', {method: 'POST'})
+            .then(r => r.json())
+            .then(() => location.reload())
+            .catch(err => alert('Refresh failed: ' + err));
+    };
+    document.getElementById('btnRefresh')?.addEventListener('click', doRefresh);
+    document.getElementById('btnEmptyRefresh')?.addEventListener('click', doRefresh);
+});
+</script>
+{% endblock %}

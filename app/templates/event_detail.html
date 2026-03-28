@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}{{ event.title }}{% endblock %}
+
+{% block content %}
+<section class="detail-hero">
+    {% if event.image_url %}
+    <div class="detail-hero-bg" style="background-image:url('{{ event.image_url }}')"></div>
+    {% endif %}
+    <div class="detail-hero-overlay"></div>
+    <div class="detail-hero-content">
+        <a href="{{ url_for('index') }}" class="back-link">← Back to Events</a>
+        <span class="detail-category">{{ event.category }}</span>
+        <h1 class="detail-title">{{ event.title }}</h1>
+    </div>
+</section>
+
+<section class="detail-body">
+    <div class="detail-grid">
+        <!-- Main Content -->
+        <div class="detail-main">
+            <h2>About This Event</h2>
+            <p class="detail-description">{{ event.description }}</p>
+
+            {% if event.image_url %}
+            <div class="detail-image-wrap">
+                <img src="{{ event.image_url }}" alt="{{ event.title }}" class="detail-image">
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Sidebar -->
+        <aside class="detail-sidebar">
+            <div class="sidebar-card">
+                <h3>Event Details</h3>
+                <ul class="sidebar-list">
+                    <li>
+                        <span class="sidebar-label">Date</span>
+                        <span class="sidebar-value">{{ event.date }}</span>
+                    </li>
+                    {% if event.time %}
+                    <li>
+                        <span class="sidebar-label">Time</span>
+                        <span class="sidebar-value">{{ event.time }}</span>
+                    </li>
+                    {% endif %}
+                    <li>
+                        <span class="sidebar-label">Venue</span>
+                        <span class="sidebar-value">{{ event.venue }}</span>
+                    </li>
+                    {% if event.city %}
+                    <li>
+                        <span class="sidebar-label">City</span>
+                        <span class="sidebar-value">{{ event.city }}</span>
+                    </li>
+                    {% endif %}
+                    <li>
+                        <span class="sidebar-label">Category</span>
+                        <span class="sidebar-value">{{ event.category }}</span>
+                    </li>
+                </ul>
+
+                {% if event.ticket_url and event.ticket_url != '#' %}
+                <a href="{{ event.ticket_url }}" target="_blank" class="btn btn-primary btn-full">
+                    Register / Get Tickets →
+                </a>
+                {% endif %}
+            </div>
+
+            <div class="sidebar-card sidebar-infra">
+                <h3>Infrastructure</h3>
+                <p class="sidebar-note">This event data was automatically fetched from the <strong>Ticketmaster Discovery API</strong> and served via <strong>AWS EC2</strong> instances behind an <strong>Application Load Balancer</strong>. Event images are stored in <strong>Amazon S3</strong>.</p>
+            </div>
+        </aside>
+    </div>
+</section>
+{% endblock %}
