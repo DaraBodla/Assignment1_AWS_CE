@@ -1,638 +1,328 @@
-# UniEvent — Scalable University Event Management System on AWS
+# Deployment of a Scalable University Event Management System on AWS
 
-> **Course:** CE 313 — Cloud Computing  
-> **Assignment:** 1 — AWS Architecture & Deployment  
-> **Student:** Dara | Reg # 2023176  
-> **Institute:** GIK Institute of Engineering Sciences & Technology  
-
----
-
-## Table of Contents
-
-1. [Project Overview](#1-project-overview)  
-2. [Architecture Design](#2-architecture-design)  
-3. [AWS Services Justification](#3-aws-services-justification)  
-4. [API Selection & Justification](#4-api-selection--justification)  
-5. [Repository Structure](#5-repository-structure)  
-6. [Prerequisites](#6-prerequisites)  
-7. [Step-by-Step Deployment Guide](#7-step-by-step-deployment-guide)  
-   - 7.1 [Get a Ticketmaster API Key](#71-get-a-ticketmaster-api-key)  
-   - 7.2 [Create the VPC & Networking](#72-create-the-vpc--networking)  
-   - 7.3 [Create IAM Role & Instance Profile](#73-create-iam-role--instance-profile)  
-   - 7.4 [Create the S3 Bucket](#74-create-the-s3-bucket)  
-   - 7.5 [Create Security Groups](#75-create-security-groups)  
-   - 7.6 [Launch EC2 Instances](#76-launch-ec2-instances)  
-   - 7.7 [Configure the Application Load Balancer](#77-configure-the-application-load-balancer)  
-   - 7.8 [Verify the Deployment](#78-verify-the-deployment)  
-8. [Alternative: One-Click CloudFormation](#8-alternative-one-click-cloudformation)  
-9. [Application Features](#9-application-features)  
-10. [How Fault Tolerance Works](#10-how-fault-tolerance-works)  
-11. [Security Measures](#11-security-measures)  
-12. [Screenshots](#12-screenshots)  
-13. [References](#13-references)  
+**Course:** CE 313 — Cloud Computing / Computer Communications & Networks
+**Student:** Dara Shikoh Bodla
+**Registration No:** 2023176
+**Institute:** Ghulam Ishaq Khan Institute of Engineering Sciences and Technology
 
 ---
 
-## 1. Project Overview
+## 1. Executive Summary
 
-**UniEvent** is a cloud-hosted web application that lets university students browse events, register for activities, and upload event posters. Instead of manual data entry, UniEvent **automatically fetches live event data** from the Ticketmaster Discovery API and presents them as official "University Events."
+UniEvent is a cloud-hosted web application that enables university students to browse events, register for activities, and upload event-related media. Rather than relying on manual data entry, the system automatically fetches live event data from the **Ticketmaster Discovery API** and presents them as official university events. The application is deployed on AWS using a fault-tolerant, secure, multi-AZ architecture built with **IAM, VPC, EC2, S3, and Elastic Load Balancing**.
 
-### Key Operational Flow
-
-```
-Internet Users
-      │
-      ▼
-┌──────────────┐
-│  Application │──── Public Subnets (2 AZs)
-│  Load Balancer│
-└──────┬───────┘
-       │ HTTP :5000
-       ▼
-┌──────────────┐     ┌──────────────┐
-│  EC2 App #1  │     │  EC2 App #2  │  ── Private Subnets (2 AZs)
-│  (Flask +    │     │  (Flask +    │
-│   Gunicorn)  │     │   Gunicorn)  │
-└──────┬───────┘     └──────┬───────┘
-       │                    │
-       ▼                    ▼
-   ┌────────┐        ┌─────────────┐
-   │  S3    │        │ Ticketmaster│
-   │ Bucket │        │ API (ext.)  │
-   └────────┘        └─────────────┘
-```
-
-1. Users access the ALB's public DNS endpoint.  
-2. ALB distributes requests across two EC2 instances in **private** subnets.  
-3. Each EC2 instance runs the Flask app, which periodically calls the **Ticketmaster Discovery API** to fetch events.  
-4. Fetched event images are mirrored into **Amazon S3** for reliable, fast delivery.  
-5. Students can upload posters directly to S3 through the web interface.  
-6. If one EC2 instance fails, the ALB health check detects it and routes all traffic to the healthy instance — **zero downtime**.
+This report documents the complete design, deployment, and verification of the system.
 
 ---
 
 ## 2. Architecture Design
 
-### Architecture Diagram
+### 2.1 Architecture Diagram
 
-![UniEvent AWS Architecture](docs/architecture-diagram.svg)
+![Architecture Diagram](docs/architecture-diagram.svg)
 
-### Network Topology (Text)
+### 2.2 System Operation Flow
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│                        VPC  10.0.0.0/16                       │
-│                                                               │
-│  ┌─────────────────────┐      ┌─────────────────────┐        │
-│  │  Public Subnet 1    │      │  Public Subnet 2    │        │
-│  │  10.0.1.0/24 (AZ-a) │      │  10.0.2.0/24 (AZ-b) │        │
-│  │                     │      │                     │        │
-│  │  ┌───────────────┐  │      │                     │        │
-│  │  │ NAT Gateway   │  │      │                     │        │
-│  │  └───────────────┘  │      │                     │        │
-│  │  ┌───────────────┐  │      │                     │        │
-│  │  │ Bastion Host  │  │      │                     │        │
-│  │  └───────────────┘  │      │                     │        │
-│  │         ▲ ALB Node  │      │       ▲ ALB Node    │        │
-│  └─────────┼───────────┘      └───────┼─────────────┘        │
-│            │                          │                       │
-│  ┌─────────┼───────────┐      ┌───────┼─────────────┐        │
-│  │  Private│Subnet 1   │      │  Priv.│Subnet 2     │        │
-│  │  10.0.10.0/24(AZ-a) │      │  10.0.20.0/24(AZ-b) │        │
-│  │                     │      │                     │        │
-│  │  ┌───────────────┐  │      │  ┌───────────────┐  │        │
-│  │  │ EC2 App #1    │  │      │  │ EC2 App #2    │  │        │
-│  │  │ Flask+Gunicorn│  │      │  │ Flask+Gunicorn│  │        │
-│  │  └───────────────┘  │      │  └───────────────┘  │        │
-│  └─────────────────────┘      └─────────────────────┘        │
-│                                                               │
-│           Internet Gateway ←→ Internet                        │
-└───────────────────────────────────────────────────────────────┘
+The system operates as follows:
 
-        External:  Ticketmaster Discovery API
-        Storage:   Amazon S3 (event-images/, event-posters/)
-```
+1. Users access the application through the **Application Load Balancer's** public DNS endpoint.
+2. The ALB distributes incoming HTTP requests across two EC2 instances deployed in **separate Availability Zones** within private subnets.
+3. Each EC2 instance runs a Flask application served by Gunicorn. A background thread periodically calls the **Ticketmaster Discovery API** to fetch event data every 30 minutes.
+4. Retrieved event images are mirrored into an **S3 bucket** for reliable delivery. Student-uploaded posters are also stored in S3.
+5. The fetched events are displayed to users as "University Events" through a responsive web interface with search and category filtering.
+6. If one EC2 instance fails, the ALB automatically detects the failure through health checks and routes all traffic to the remaining healthy instance, ensuring **zero downtime**.
 
-### Component Roles
+### 2.3 Network Topology
 
-| Component | Purpose |
-|-----------|---------|
-| **VPC** | Isolated virtual network with CIDR `10.0.0.0/16` |
-| **Public Subnets** (×2) | Host the ALB nodes, NAT Gateway, and Bastion |
-| **Private Subnets** (×2) | Host the EC2 application instances (no direct internet) |
-| **Internet Gateway** | Provides internet connectivity to public subnets |
-| **NAT Gateway** | Lets private instances access the internet (API calls, updates) without being directly reachable |
-| **ALB** | Distributes HTTP traffic, performs health checks |
-| **EC2 Instances** (×2) | Run the Flask/Gunicorn app in separate AZs |
-| **S3 Bucket** | Stores event images and uploaded posters |
-| **IAM Role** | Grants EC2 instances scoped S3 permissions — no hard-coded keys |
-| **Security Groups** | Firewall rules: ALB accepts 80/443, EC2 accepts 5000 only from ALB |
+| Component | Configuration | Purpose |
+|-----------|--------------|---------|
+| VPC | `10.0.0.0/16` | Isolated network boundary for all resources |
+| Public Subnet 1 | `10.0.1.0/24` (us-east-1a) | Hosts ALB node, NAT Gateway |
+| Public Subnet 2 | `10.0.2.0/24` (us-east-1b) | Hosts ALB node |
+| Private Subnet 1 | `10.0.10.0/24` (us-east-1a) | Hosts EC2 App Server 1 |
+| Private Subnet 2 | `10.0.20.0/24` (us-east-1b) | Hosts EC2 App Server 2 |
+| Internet Gateway | Attached to VPC | Internet access for public subnets |
+| NAT Gateway | In Public Subnet 1 | Outbound internet for private subnets |
 
 ---
 
-## 3. AWS Services Justification
+## 3. AWS Services — Design Justification
 
 ### 3.1 IAM (Identity & Access Management)
 
-**Why:** EC2 instances need to read/write objects in S3. Instead of embedding AWS credentials in code (a security anti-pattern), we create an **IAM Role** attached to an **Instance Profile**. The role grants only the S3 actions the app needs (`s3:PutObject`, `s3:GetObject`, `s3:ListBucket`, `s3:DeleteObject`) scoped to a single bucket. This follows the **Principle of Least Privilege**.
+EC2 instances require read/write access to S3 for storing event images and uploaded posters. Rather than embedding AWS credentials in the application code (a security anti-pattern), an **IAM Role** (`UniEvent-EC2-Role`) is attached to the instances via an **Instance Profile**. The role grants only the minimum required S3 permissions (`PutObject`, `GetObject`, `ListBucket`, `DeleteObject`) scoped to a single bucket. Additionally, the `AmazonSSMManagedInstanceCore` policy enables secure remote management via Systems Manager without requiring SSH key distribution. This follows the **Principle of Least Privilege**.
 
 ### 3.2 VPC (Virtual Private Cloud)
 
-**Why:** A VPC provides **network isolation**. We segment resources into public and private subnets across **two Availability Zones** for fault tolerance. The EC2 instances live in **private subnets** — they have no public IP and cannot be reached directly from the internet. Only the ALB (in public subnets) is internet-facing. A **NAT Gateway** lets the private instances make outbound calls (to the Ticketmaster API and S3) without exposing inbound ports.
+The VPC provides **complete network isolation** for the application infrastructure. Resources are segmented into public and private subnets across **two Availability Zones** (us-east-1a and us-east-1b) for fault tolerance. EC2 application instances are placed in **private subnets** with no public IP addresses, making them unreachable directly from the internet. Only the ALB (in public subnets) is internet-facing. A **NAT Gateway** allows private instances to make outbound calls (to the Ticketmaster API, S3, and package repositories) without exposing any inbound ports.
 
 ### 3.3 EC2 (Elastic Compute Cloud)
 
-**Why:** EC2 provides full control over the compute environment. We deploy **two t2.micro instances** in separate AZs, each running the Flask application behind Gunicorn (a production WSGI server). Two instances provide **redundancy** — if one AZ experiences an outage, the other AZ continues serving traffic.
+Two `t3.micro` instances run the Flask application behind Gunicorn (a production-grade WSGI server with 3 worker processes). Deploying instances in **separate Availability Zones** provides redundancy — if one AZ experiences an outage, the other continues serving traffic. Each instance is bootstrapped automatically via a **User Data** script that clones the application repository, installs dependencies, creates environment configuration, and registers a systemd service for automatic restart on failure.
 
 ### 3.4 S3 (Simple Storage Service)
 
-**Why:** S3 provides **99.999999999% durability** for stored objects. Event images fetched from the API are mirrored into S3, and student-uploaded posters are stored there. S3 also offers static asset serving and bucket policies for controlled public read access. This offloads storage from the EC2 instances and prevents data loss on instance termination.
+Amazon S3 provides **99.999999999% (11 nines) durability** for stored objects. The bucket (`unievent-media-dara26`) serves two purposes: storing event images mirrored from the Ticketmaster API, and storing student-uploaded event posters. A **bucket policy** grants public read access only to the `event-images/` and `event-posters/` prefixes, while all other objects remain private. This offloads media storage from the EC2 instances and ensures data persists independently of instance lifecycle.
 
-### 3.5 Elastic Load Balancing (ALB)
+### 3.5 Elastic Load Balancing (Application Load Balancer)
 
-**Why:** The **Application Load Balancer** is the single entry point for all user traffic. It performs **health checks** (`GET /health` every 30 seconds) on both EC2 instances. If an instance fails the health check three consecutive times, the ALB stops routing traffic to it. When the instance recovers, traffic is automatically restored. This is the core of our **fault tolerance** strategy.
-
----
-
-## 4. API Selection & Justification
-
-### Selected API: **Ticketmaster Discovery API v2**
-
-| Criterion | Evaluation |
-|-----------|------------|
-| **Structured JSON** | Returns well-structured JSON with events, venues, images, dates, classifications |
-| **Event Fields** | `name` (title), `dates.start.localDate` (date), `venues[].name` (venue), `info` (description), `images[]` (posters) |
-| **Free Tier** | 5,000 requests/day — more than sufficient |
-| **Documentation** | Comprehensive official docs at developer.ticketmaster.com |
-| **Reliability** | Production-grade API backed by Ticketmaster/Live Nation |
-| **Authentication** | Simple API key as a query parameter |
-| **Image Availability** | Returns multiple image sizes and ratios per event |
-
-**Why not Eventbrite?** Eventbrite's API requires OAuth 2.0 even for public events, which adds unnecessary complexity. Ticketmaster uses a simple API key, making it more suitable for this demonstration.
-
-**API Endpoint Used:**
-```
-GET https://app.ticketmaster.com/discovery/v2/events.json
-    ?apikey=YOUR_KEY
-    &size=20
-    &sort=date,asc
-    &classificationName=Music,Arts,Sports,Education,Festival
-    &countryCode=US
-```
-
-**Sample Response Fields Mapped:**
-
-```json
-{
-  "id": "vvG1IZ9YLkLfRB",
-  "name": "Spring Music Festival",           → title
-  "dates": { "start": { "localDate": "2026-04-15" } },  → date
-  "_embedded": { "venues": [{ "name": "University Arena" }] },  → venue
-  "info": "Annual spring music celebration",  → description
-  "images": [{ "url": "https://..." }]       → image_url (mirrored to S3)
-}
-```
+The ALB is the single entry point for all user traffic. It performs **health checks** by sending `GET /health` requests to each EC2 instance every 30 seconds. If an instance fails 3 consecutive health checks, the ALB marks it as unhealthy and stops routing traffic to it. When the instance recovers and passes 2 consecutive checks, traffic is automatically restored. The ALB spans both public subnets, ensuring availability even if one AZ fails.
 
 ---
 
-## 5. Repository Structure
+## 4. External API — Selection and Justification
+
+### 4.1 Selected API: Ticketmaster Discovery API v2
+
+The **Ticketmaster Discovery API** was selected after evaluating multiple options including Eventbrite, PredictHQ, and SeatGeek.
+
+| Criterion | Ticketmaster | Eventbrite | PredictHQ |
+|-----------|-------------|------------|-----------|
+| Authentication | Simple API key | OAuth 2.0 required | OAuth 2.0 required |
+| Free tier | 5,000 requests/day | Limited | 1,000 records/day |
+| Image availability | Multiple sizes per event | Limited | No images |
+| Structured JSON | Excellent | Good | Good |
+| Event fields | Title, date, venue, description, images, category | Title, date, venue | Title, date, category |
+
+Ticketmaster was chosen because it provides the richest event data with the simplest authentication mechanism (a query-parameter API key), includes multiple image sizes per event, and offers a generous free tier of 5,000 requests per day.
+
+### 4.2 API Endpoint and Data Mapping
+
+**Endpoint:** `GET https://app.ticketmaster.com/discovery/v2/events.json`
+
+| API Response Field | Application Field | Purpose |
+|-------------------|------------------|---------|
+| `name` | `title` | Event display name |
+| `dates.start.localDate` | `date` | Event date |
+| `dates.start.localTime` | `time` | Event time |
+| `_embedded.venues[0].name` | `venue` | Venue name |
+| `_embedded.venues[0].city.name` | `city` | Venue city |
+| `info` or `pleaseNote` | `description` | Event description |
+| `images[0].url` | `image_url` | Event poster (mirrored to S3) |
+| `classifications[0].segment.name` | `category` | Event category for filtering |
+
+---
+
+## 5. Deployment — Step-by-Step Evidence
+
+### 5.1 VPC Creation
+
+A custom VPC with CIDR block `10.0.0.0/16` was created to isolate all UniEvent resources from the default AWS network. DNS resolution and DNS hostnames were enabled to allow internal name resolution.
+
+![VPC Created](screenshots/01-vpc-created.png)
+
+### 5.2 Subnet Configuration
+
+Four subnets were created across two Availability Zones. Two public subnets (10.0.1.0/24 and 10.0.2.0/24) host the ALB and NAT Gateway. Two private subnets (10.0.10.0/24 and 10.0.20.0/24) host the EC2 application instances, ensuring they have no direct internet exposure.
+
+![Subnets](screenshots/02-subnets.png)
+
+### 5.3 Internet Gateway
+
+An Internet Gateway (`UniEvent-IGW`) was created and attached to the VPC, providing internet connectivity for resources in the public subnets. This is required for the ALB to receive external traffic and for the NAT Gateway to route outbound traffic from private subnets.
+
+![Internet Gateway](screenshots/03-igw-attached.png)
+
+### 5.4 NAT Gateway
+
+A NAT Gateway (`UniEvent-NAT`) was deployed in Public Subnet 1 with an automatically allocated Elastic IP (100.55.177.237). This enables the EC2 instances in private subnets to make outbound internet calls (for fetching events from the Ticketmaster API, downloading Python packages, and cloning the GitHub repository) without being directly reachable from the internet.
+
+![NAT Gateway](screenshots/04-nat-gateway.png)
+
+### 5.5 Route Tables
+
+**Public Route Table** (`UniEvent-Public-RT`): Routes `0.0.0.0/0` through the Internet Gateway. Associated with both public subnets (2 explicit subnet associations).
+
+![Public Route Table](screenshots/05-public-rt.png)
+
+**Private Route Table** (`UniEvent-Private-RT`): Routes `0.0.0.0/0` through the NAT Gateway. Associated with both private subnets (2 explicit subnet associations). This ensures private instances can reach the internet for outbound calls only.
+
+![Private Route Table](screenshots/06-private-rt.png)
+
+### 5.6 Security Groups
+
+**ALB Security Group** (`UniEvent-ALB-SG`): Allows inbound HTTP (port 80) and HTTPS (port 443) traffic from anywhere (`0.0.0.0/0`). This is the only security group exposed to the public internet.
+
+![ALB Security Group](screenshots/07-alb-sg.png)
+
+**EC2 Security Group** (`UniEvent-EC2-SG`): Allows inbound traffic only on port 5000 (application port) from the ALB Security Group, and SSH (port 22) for debugging. The EC2 instances cannot be reached directly from the internet — only the ALB can forward traffic to them. This is known as **security group chaining**.
+
+![EC2 Security Group](screenshots/08-ec2-sg.png)
+
+### 5.7 IAM Role and Instance Profile
+
+The IAM Role (`UniEvent-EC2-Role`) was created with two policies: `AmazonSSMManagedInstanceCore` (AWS managed, for remote management via Session Manager) and a custom inline policy `UniEvent-S3-Access` granting scoped S3 permissions to the application bucket only. The Instance Profile ARN confirms the role is available for EC2 attachment.
+
+![IAM Role](screenshots/09-iam-role.png)
+
+### 5.8 S3 Bucket
+
+The S3 bucket (`unievent-media-dara26`) was created in us-east-1. A bucket policy was configured to allow public read access (`s3:GetObject`) only on the `event-images/*` and `event-posters/*` prefixes, keeping all other objects private.
+
+![S3 Bucket Created](screenshots/10-s3-bucket.png)
+
+![S3 Bucket Policy](screenshots/11-s3-policy.png)
+
+### 5.9 EC2 Instance Launch
+
+Two EC2 instances (`t3.micro`, Amazon Linux 2023) were launched in private subnets with the `UniEvent-EC2-Role` IAM profile attached. A User Data bootstrap script automatically provisions each instance at boot: cloning the application from GitHub, installing Python dependencies with `pip3 install --ignore-installed`, writing environment configuration to a `.env` file, and registering a systemd service (`unievent.service`) that starts Gunicorn and auto-restarts on failure.
+
+![EC2 Launch Success](screenshots/12-ec2-launch.png)
+
+![Both Instances Running](screenshots/13-ec2-running.png)
+
+Both instances are running in separate Availability Zones (us-east-1a and us-east-1b) with all 3/3 status checks passing. Neither instance has a public IP — they are fully isolated in private subnets.
+
+### 5.10 Application Load Balancer
+
+The ALB (`UniEvent-ALB`) was created as internet-facing in both public subnets (us-east-1a and us-east-1b). Status is **Active**. An HTTP listener on port 80 forwards traffic to the `UniEvent-TG` target group, which routes requests to port 5000 on the EC2 instances with a `/health` health check path.
+
+**DNS Name:** `UniEvent-ALB-1162431190.us-east-1.elb.amazonaws.com`
+
+![ALB Active](screenshots/14-alb-active.png)
+
+---
+
+## 6. Verification and Testing
+
+### 6.1 Health Check Endpoint
+
+The `/health` endpoint confirms the application is running and has successfully cached 20 events from the Ticketmaster API. The ALB uses this endpoint every 30 seconds to determine instance health.
+
+![Health Check](screenshots/15-health-check.png)
+
+**Response:** `{"cached_events": 20, "status": "healthy", "timestamp": "2026-03-28T18:45:20.983280"}`
+
+### 6.2 Target Group — All Targets Healthy
+
+Both EC2 instances passed the ALB health checks and are registered as healthy (2 Healthy, 0 Unhealthy) in the target group. The ALB distributes traffic evenly across both instances.
+
+![Targets Healthy](screenshots/16-targets-healthy.png)
+
+### 6.3 Live Application
+
+The UniEvent homepage is accessible via the ALB DNS name. It displays 20 events fetched from the Ticketmaster API with event images, category tags (Sports, Arts & Theatre, Music, Miscellaneous), a live search bar, category filtering, and a refresh button. The "AWS Hosted" and "Auto-synced" badges confirm the deployment context.
+
+![Homepage Live](screenshots/17-homepage-live.png)
+
+### 6.4 Fault Tolerance Test
+
+To verify fault tolerance, one EC2 instance was stopped. The target group shows **1 Healthy, 0 Unhealthy, 1 Unused** (the stopped instance). The website continued to function without any downtime, served entirely by the remaining healthy instance. When the stopped instance was restarted, it automatically rejoined the target group after passing health checks.
+
+![Fault Tolerance](screenshots/18-fault-tolerance.png)
+
+This confirms the system meets the requirement: **"The system must continue operating even if one EC2 instance fails."**
+
+### 6.5 S3 Upload Functionality
+
+A test image was uploaded through the web interface at `/upload`. The application successfully stored the file in the S3 bucket under the `event-posters/` prefix via the IAM Role (no hardcoded credentials) and returned the public S3 URL. The "Upload Successful ✓" confirmation is displayed with the image preview.
+
+![Upload Success](screenshots/19-upload-success.png)
+
+### 6.6 S3 Object Verification
+
+The uploaded file (101.4 KB JPG) is confirmed present in the S3 bucket at `unievent-media-dara26/event-posters/`, verifying the end-to-end upload pipeline from the web interface through the EC2 application to S3 storage.
+
+![S3 Object](screenshots/20-s3-object.png)
+
+---
+
+## 7. Security Analysis
+
+| Layer | Implementation | Threat Mitigated |
+|-------|---------------|-----------------|
+| Network Isolation | EC2 instances in private subnets with no public IP | Direct access from internet |
+| Security Group Chaining | EC2 SG accepts port 5000 only from ALB SG | Unauthorized port access |
+| IAM Least Privilege | Instance Role with scoped S3 policy — no hardcoded credentials | Credential leakage |
+| NAT Gateway | Private instances access internet outbound-only | Inbound exploitation |
+| Input Validation | File uploads validated by extension; filenames sanitized via `secure_filename()` | Malicious file upload |
+| S3 Access Control | Bucket policy restricts public read to specific prefixes only | Unauthorized data access |
+| Environment Isolation | Secrets stored in `.env` file loaded via systemd `EnvironmentFile`, not in source code | Secret exposure in Git |
+
+---
+
+## 8. Alternative Deployment — CloudFormation
+
+In addition to the manual console deployment documented above, the project includes a **CloudFormation template** (`infrastructure/cloudformation.yaml`) that creates the entire infrastructure stack as Infrastructure-as-Code.
+
+### 8.1 Overview
+
+CloudFormation is an AWS service that reads a declarative YAML template and automatically provisions all described resources in the correct dependency order. The provided template defines all 20+ resources (VPC, subnets, gateways, route tables, security groups, IAM role, S3 bucket, EC2 instances, ALB, target group, and listener) in a single 473-line file.
+
+### 8.2 Comparison with Manual Deployment
+
+| Aspect | Manual Console | CloudFormation |
+|--------|---------------|----------------|
+| Deployment time | 30-45 minutes | 5-10 minutes |
+| Reproducibility | Depends on human accuracy | Identical every time |
+| Error recovery | Manual rollback required | Automatic rollback on any failure |
+| Cleanup | Delete 13+ resources individually | Single `delete-stack` command |
+| Version control | Cannot track console clicks | Template is Git-versioned |
+| Audit trail | CloudTrail logs only | Template IS the documentation |
+
+### 8.3 Deployment and Cleanup
+
+**Deploy (one command):**
+```
+aws cloudformation create-stack --stack-name UniEvent
+  --template-body file://infrastructure/cloudformation.yaml
+  --parameters ParameterKey=TicketmasterApiKey,ParameterValue=KEY
+               ParameterKey=KeyPairName,ParameterValue=unievent-key
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+**Cleanup (one command):**
+```
+aws cloudformation delete-stack --stack-name UniEvent
+```
+
+---
+
+## 9. Repository Structure
 
 ```
 Assignment1_AWS_CE/
-├── README.md                          ← This file
-├── .gitignore
-│
-├── app/                               ← Application source code
-│   ├── app.py                         ← Main Flask application
-│   ├── gunicorn.conf.py               ← Gunicorn production config
-│   ├── requirements.txt               ← Python dependencies
-│   ├── .env.example                   ← Environment variables template
-│   ├── templates/
-│   │   ├── base.html                  ← Shared layout template
-│   │   ├── index.html                 ← Events listing page
-│   │   ├── event_detail.html          ← Single event detail page
-│   │   └── upload.html                ← Poster upload page
-│   └── static/
-│       ├── css/
-│       │   └── style.css              ← Main stylesheet
-│       └── js/
-│           └── main.js                ← Client-side JavaScript
-│
+├── README.md                              ← This report
+├── app/
+│   ├── app.py                             ← Flask application (routes, API, S3)
+│   ├── gunicorn.conf.py                   ← Production server configuration
+│   ├── requirements.txt                   ← Python dependencies
+│   ├── templates/                         ← HTML templates (Jinja2)
+│   │   ├── base.html, index.html,
+│   │   ├── event_detail.html, upload.html
+│   └── static/                            ← CSS and JavaScript
+│       ├── css/style.css
+│       └── js/main.js
 ├── infrastructure/
-│   └── cloudformation.yaml            ← Full AWS CloudFormation template
-│
+│   └── cloudformation.yaml                ← Full IaC template (20+ resources)
 ├── scripts/
-│   ├── ec2-user-data.sh               ← EC2 bootstrap script (User Data)
-│   ├── deploy-aws.sh                  ← Automated full AWS CLI deployment
-│   └── cleanup-aws.sh                 ← Tear down all AWS resources
-│
+│   ├── ec2-user-data.sh                   ← EC2 bootstrap script
+│   ├── deploy-aws-cli.sh                  ← Automated CLI deployment
+│   ├── cleanup.sh                         ← Resource teardown
+│   └── local-setup.ps1                    ← Windows local dev setup
+├── screenshots/                           ← Deployment evidence (20 images)
 └── docs/
-    ├── architecture-diagram.svg       ← Visual AWS architecture diagram
-    ├── API_JUSTIFICATION.md           ← API evaluation & selection rationale
-    ├── TESTING.md                     ← Full testing & verification guide
-    └── LOCAL_DEVELOPMENT.md           ← Run the app locally before deploying
+    ├── architecture-diagram.svg
+    ├── API.md, API_JUSTIFICATION.md
+    └── TESTING.md
 ```
 
 ---
 
-## 6. Prerequisites
+## 10. Conclusion
 
-Before deploying, ensure you have:
-
-- [x] An **AWS Account** with admin access
-- [x] An **EC2 Key Pair** created in your target region
-- [x] **AWS CLI v2** installed and configured (`aws configure`)
-- [x] A **Ticketmaster API Key** (free at [developer.ticketmaster.com](https://developer.ticketmaster.com/))
-- [x] **Git** installed locally
+The UniEvent system was successfully designed, deployed, and verified on AWS. The architecture demonstrates security awareness (private subnets, IAM roles, security group chaining), fault tolerance (multi-AZ deployment with ALB health checks), scalability (stateless application design with external storage), and cloud best practices (Infrastructure-as-Code, automated bootstrapping, environment-based configuration). All assignment requirements were met: the web application runs on multiple EC2 instances in private subnets, periodically fetches event data from an external API, stores images securely in S3, displays events to users, and continues operating when one instance fails.
 
 ---
 
-## 7. Step-by-Step Deployment Guide
-
-### 7.1 Get a Ticketmaster API Key
-
-1. Go to [developer.ticketmaster.com](https://developer.ticketmaster.com/)
-2. Click **"Get Your API Key"** and create an account
-3. After login, navigate to **My Apps** → your default app
-4. Copy the **Consumer Key** — this is your API key
-5. Save it securely; you will need it in Step 7.6
-
-### 7.2 Create the VPC & Networking
-
-#### Step A: Create the VPC
-
-1. Open **AWS Console** → **VPC** → **Your VPCs** → **Create VPC**
-2. Configure:
-   - **Name tag:** `UniEvent-VPC`
-   - **IPv4 CIDR block:** `10.0.0.0/16`
-3. Click **Create VPC**
-
-#### Step B: Create Subnets
-
-Create **four** subnets:
-
-| Name | CIDR | AZ | Type |
-|------|------|----|------|
-| `UniEvent-Public-1` | `10.0.1.0/24` | us-east-1a | Public |
-| `UniEvent-Public-2` | `10.0.2.0/24` | us-east-1b | Public |
-| `UniEvent-Private-1` | `10.0.10.0/24` | us-east-1a | Private |
-| `UniEvent-Private-2` | `10.0.20.0/24` | us-east-1b | Private |
-
-For each: **VPC** → **Subnets** → **Create subnet** → Select `UniEvent-VPC` → fill in name, CIDR, AZ.
-
-For the two **public** subnets, also:
-- Select the subnet → **Actions** → **Edit subnet settings** → Enable **Auto-assign public IPv4 address**
-
-#### Step C: Create & Attach Internet Gateway
-
-1. **VPC** → **Internet Gateways** → **Create internet gateway**
-   - Name: `UniEvent-IGW`
-2. Select it → **Actions** → **Attach to VPC** → Select `UniEvent-VPC`
-
-#### Step D: Create NAT Gateway
-
-1. **VPC** → **NAT Gateways** → **Create NAT gateway**
-   - **Subnet:** `UniEvent-Public-1`
-   - **Elastic IP:** Click **Allocate Elastic IP** then select it
-   - **Name:** `UniEvent-NAT`
-2. Click **Create NAT gateway**
-
-#### Step E: Configure Route Tables
-
-**Public Route Table:**
-
-1. **VPC** → **Route Tables** → **Create route table**
-   - Name: `UniEvent-Public-RT`, VPC: `UniEvent-VPC`
-2. Select it → **Routes** tab → **Edit routes** → **Add route:**
-   - Destination: `0.0.0.0/0`, Target: `UniEvent-IGW`
-3. **Subnet associations** tab → **Edit** → Associate `UniEvent-Public-1` and `UniEvent-Public-2`
-
-**Private Route Table:**
-
-1. Create another route table: `UniEvent-Private-RT`
-2. **Edit routes** → **Add route:**
-   - Destination: `0.0.0.0/0`, Target: `UniEvent-NAT`
-3. Associate `UniEvent-Private-1` and `UniEvent-Private-2`
-
-### 7.3 Create IAM Role & Instance Profile
-
-1. Open **IAM** → **Roles** → **Create role**
-2. **Trusted entity type:** AWS Service → **EC2**
-3. **Permissions:** Attach `AmazonSSMManagedInstanceCore` (for management)
-4. Click **Next** → **Role name:** `UniEvent-EC2-Role` → **Create role**
-5. Open the newly created role → **Add permissions** → **Create inline policy** → **JSON** tab:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:ListBucket",
-        "s3:DeleteObject"
-      ],
-      "Resource": [
-        "arn:aws:s3:::unievent-media-YOURACCOUNTID",
-        "arn:aws:s3:::unievent-media-YOURACCOUNTID/*"
-      ]
-    }
-  ]
-}
-```
-
-6. Name the policy `UniEvent-S3-Access` → **Create policy**
-
-### 7.4 Create the S3 Bucket
-
-1. Open **S3** → **Create bucket**
-2. **Bucket name:** `unievent-media-YOURACCOUNTID` (must be globally unique)
-3. **Region:** Same as your VPC (e.g., `us-east-1`)
-4. **Uncheck** "Block all public access" (we need public read for images)
-   - Acknowledge the warning
-5. Click **Create bucket**
-
-#### Set Bucket Policy for Public Read
-
-1. Open the bucket → **Permissions** → **Bucket Policy** → paste:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "PublicReadImages",
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::unievent-media-YOURACCOUNTID/event-images/*"
-    },
-    {
-      "Sid": "PublicReadPosters",
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::unievent-media-YOURACCOUNTID/event-posters/*"
-    }
-  ]
-}
-```
-
-#### Enable CORS
-
-1. **Permissions** → **CORS configuration**:
-
-```json
-[
-  {
-    "AllowedHeaders": ["*"],
-    "AllowedMethods": ["GET"],
-    "AllowedOrigins": ["*"],
-    "MaxAgeSeconds": 3600
-  }
-]
-```
-
-### 7.5 Create Security Groups
-
-Navigate to **VPC** → **Security Groups** → **Create security group** for each:
-
-#### ALB Security Group
-
-| Field | Value |
-|-------|-------|
-| **Name** | `UniEvent-ALB-SG` |
-| **VPC** | `UniEvent-VPC` |
-| **Inbound Rule 1** | HTTP (80) from `0.0.0.0/0` |
-| **Inbound Rule 2** | HTTPS (443) from `0.0.0.0/0` |
-
-#### EC2 Security Group
-
-| Field | Value |
-|-------|-------|
-| **Name** | `UniEvent-EC2-SG` |
-| **VPC** | `UniEvent-VPC` |
-| **Inbound Rule 1** | Custom TCP (5000) from `UniEvent-ALB-SG` |
-| **Inbound Rule 2** | SSH (22) from `UniEvent-Bastion-SG` |
-
-#### Bastion Security Group
-
-| Field | Value |
-|-------|-------|
-| **Name** | `UniEvent-Bastion-SG` |
-| **VPC** | `UniEvent-VPC` |
-| **Inbound Rule 1** | SSH (22) from `YOUR_IP/32` |
-
-### 7.6 Launch EC2 Instances
-
-#### Launch App Instance 1
-
-1. **EC2** → **Launch Instances**
-2. **Name:** `UniEvent-App-1`
-3. **AMI:** Amazon Linux 2023
-4. **Instance type:** `t2.micro` (free tier)
-5. **Key pair:** Select your existing key pair
-6. **Network settings:**
-   - VPC: `UniEvent-VPC`
-   - Subnet: `UniEvent-Private-1`
-   - Auto-assign public IP: **Disable**
-   - Security group: `UniEvent-EC2-SG`
-7. **Advanced details:**
-   - IAM instance profile: `UniEvent-EC2-Role`
-   - User data: paste the contents of `scripts/ec2-user-data.sh`
-     - **Replace** `<YOUR_GITHUB_USERNAME>` with your GitHub username
-     - **Replace** `REPLACE_WITH_YOUR_TICKETMASTER_KEY` with your actual key
-     - **Replace** `unievent-media-bucket` with your actual bucket name
-8. Click **Launch instance**
-
-#### Launch App Instance 2
-
-Repeat the above but:
-- **Name:** `UniEvent-App-2`
-- **Subnet:** `UniEvent-Private-2`
-
-#### Launch Bastion Host (optional, for debugging)
-
-- **Name:** `UniEvent-Bastion`
-- **Subnet:** `UniEvent-Public-1`
-- **Security group:** `UniEvent-Bastion-SG`
-- No user data needed
-
-### 7.7 Configure the Application Load Balancer
-
-#### Step A: Create Target Group
-
-1. **EC2** → **Target Groups** → **Create target group**
-2. Target type: **Instances**
-3. **Name:** `UniEvent-TG`
-4. **Protocol:** HTTP, **Port:** 5000
-5. **VPC:** `UniEvent-VPC`
-6. **Health check path:** `/health`
-7. **Advanced settings:**
-   - Healthy threshold: 2
-   - Unhealthy threshold: 3
-   - Interval: 30 seconds
-8. Click **Next** → Select `UniEvent-App-1` and `UniEvent-App-2` → **Include as pending** → **Create target group**
-
-#### Step B: Create the ALB
-
-1. **EC2** → **Load Balancers** → **Create Load Balancer** → **Application Load Balancer**
-2. **Name:** `UniEvent-ALB`
-3. **Scheme:** Internet-facing
-4. **IP type:** IPv4
-5. **Network mapping:**
-   - VPC: `UniEvent-VPC`
-   - Select **both** public subnets
-6. **Security group:** `UniEvent-ALB-SG`
-7. **Listener:** HTTP : 80 → Forward to `UniEvent-TG`
-8. Click **Create load balancer**
-
-#### Step C: Get the ALB DNS Name
-
-1. Go to **Load Balancers** → Select `UniEvent-ALB`
-2. Copy the **DNS name** (e.g., `UniEvent-ALB-123456789.us-east-1.elb.amazonaws.com`)
-3. Open it in your browser: `http://<ALB-DNS-NAME>`
-
-### 7.8 Verify the Deployment
-
-1. **Health check:** Visit `http://<ALB-DNS-NAME>/health`
-   - Should return `{"status": "healthy", "cached_events": 20}`
-
-2. **Events page:** Visit `http://<ALB-DNS-NAME>/`
-   - Should display a grid of events fetched from Ticketmaster
-
-3. **Upload test:** Visit `http://<ALB-DNS-NAME>/upload`
-   - Upload a test image → confirm it appears with an S3 URL
-
-4. **Fault tolerance test:**
-   - Go to EC2 Console → Stop `UniEvent-App-1`
-   - Wait ~90 seconds for health check to mark it unhealthy
-   - Refresh the website — it should still work (served by App-2)
-   - Start App-1 again → ALB automatically adds it back
-
-5. **API endpoint:** Visit `http://<ALB-DNS-NAME>/api/events`
-   - Should return JSON array of all cached events
-
----
-
-## 8. Alternative: One-Click CloudFormation
-
-Instead of doing everything manually, you can deploy the entire stack using the provided CloudFormation template.
-
-**On Linux/Mac (bash):**
-```bash
-aws cloudformation create-stack \
-  --stack-name UniEvent \
-  --template-body file://infrastructure/cloudformation.yaml \
-  --parameters \
-    ParameterKey=TicketmasterApiKey,ParameterValue=YOUR_KEY \
-    ParameterKey=KeyPairName,ParameterValue=YOUR_KEYPAIR \
-  --capabilities CAPABILITY_NAMED_IAM
-```
-
-**On Windows (PowerShell):**
-```powershell
-aws cloudformation create-stack `
-  --stack-name UniEvent `
-  --template-body file://infrastructure/cloudformation.yaml `
-  --parameters `
-    ParameterKey=TicketmasterApiKey,ParameterValue=YOUR_KEY `
-    ParameterKey=KeyPairName,ParameterValue=YOUR_KEYPAIR `
-  --capabilities CAPABILITY_NAMED_IAM
-```
-
-Monitor progress:
-```
-aws cloudformation describe-stacks --stack-name UniEvent --query "Stacks[0].StackStatus"
-```
-
-Get the ALB URL:
-```
-aws cloudformation describe-stacks --stack-name UniEvent --query "Stacks[0].Outputs[?OutputKey=='ALBEndpoint'].OutputValue" --output text
-```
-
----
-
-## 9. Application Features
-
-| Feature | Description |
-|---------|-------------|
-| **Auto-Fetch Events** | Background thread calls Ticketmaster API every 30 minutes |
-| **Event Listing** | Responsive grid with search and category filters |
-| **Event Detail** | Full event page with date, venue, description, image |
-| **Poster Upload** | Drag-and-drop image upload directly to S3 |
-| **Health Check** | `/health` endpoint for ALB monitoring |
-| **REST API** | `/api/events` returns cached events as JSON |
-| **Manual Refresh** | `/api/refresh` triggers an immediate API fetch |
-| **S3 Image Mirror** | Event images from Ticketmaster are copied to S3 for reliability |
-
----
-
-## 10. How Fault Tolerance Works
-
-```
-Normal operation:        One instance fails:
-                        
-  User ──→ ALB          User ──→ ALB
-            │ ╲                   │
-            ▼  ▼                  ▼
-         App1  App2            App2 (healthy)
-                               App1 ✗ (unhealthy, removed from rotation)
-```
-
-1. ALB performs `GET /health` on both instances every **30 seconds**
-2. If an instance fails **3 consecutive** health checks, the ALB marks it **unhealthy**
-3. All traffic is routed to the remaining healthy instance
-4. When the failed instance recovers and passes **2 consecutive** checks, it is added back
-5. Instances are in **separate Availability Zones**, so even an entire data center failure is survivable
-
----
-
-## 11. Security Measures
-
-| Layer | Measure |
-|-------|---------|
-| **Network** | EC2 instances in **private subnets** — no public IP, no direct access |
-| **Firewall** | EC2 Security Group only allows port 5000 from the ALB SG |
-| **IAM** | Instance Role with **least-privilege** S3 policy — no hard-coded credentials |
-| **NAT** | Private instances access internet via NAT Gateway (outbound only) |
-| **Bastion** | SSH to private instances only via a bastion host in the public subnet |
-| **S3** | Bucket policy restricts public read to specific prefixes (`event-images/`, `event-posters/`) |
-| **Input** | File uploads validated by extension; filenames sanitized via `secure_filename()` |
-| **HTTPS** | ALB supports HTTPS listener (requires ACM certificate — optional for demo) |
-
----
-
-## 12. Screenshots
-
-> **Note:** Add screenshots of the following after deployment:
-> 
-> 1. VPC with subnets visible in the console
-> 2. EC2 instances running in private subnets
-> 3. ALB with healthy target group
-> 4. S3 bucket with event images
-> 5. UniEvent homepage displaying events
-> 6. Event detail page
-> 7. Upload page with successful S3 upload
-> 8. `/health` endpoint response
-> 9. Fault tolerance test — one instance stopped, site still working
-
----
-
-## 13. References
-
-- AWS VPC Documentation: https://docs.aws.amazon.com/vpc/
-- AWS EC2 User Guide: https://docs.aws.amazon.com/ec2/
-- AWS S3 Developer Guide: https://docs.aws.amazon.com/s3/
-- AWS ELB Documentation: https://docs.aws.amazon.com/elasticloadbalancing/
-- AWS IAM Best Practices: https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html
-- Ticketmaster Discovery API: https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/
-- Flask Documentation: https://flask.palletsprojects.com/
-- Gunicorn Documentation: https://docs.gunicorn.org/
-- AWS Well-Architected Framework: https://aws.amazon.com/architecture/well-architected/
-
----
-
-**Developed for CE 313 Cloud Computing — GIK Institute — 2026**
+## 11. References
+
+- AWS VPC Documentation — https://docs.aws.amazon.com/vpc/
+- AWS EC2 User Guide — https://docs.aws.amazon.com/ec2/
+- AWS S3 Developer Guide — https://docs.aws.amazon.com/s3/
+- AWS ELB Documentation — https://docs.aws.amazon.com/elasticloadbalancing/
+- AWS IAM Best Practices — https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html
+- AWS CloudFormation User Guide — https://docs.aws.amazon.com/cloudformation/
+- Ticketmaster Discovery API v2 — https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/
+- Flask Documentation — https://flask.palletsprojects.com/
+- AWS Well-Architected Framework — https://aws.amazon.com/architecture/well-architected/
